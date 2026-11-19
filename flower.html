@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Night Flower</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Space+Grotesk:wght@500;700&display=swap">
+<style>
+/* Layout: one centred stage (the 800x480 night sky) with a quiet control row beneath it.
+   Look: committed dark, the flower's pink is the only accent. */
+:root {
+  --bg: #06070c;
+  --sky: #000000;
+  --ink: #ece9f3;
+  --muted: #9a97aa;
+  --line: #262532;
+  --accent: #ff6fa8;
+  --accent-ink: #2a0618;
+  --display: "Space Grotesk", system-ui, sans-serif;
+  --body: "Inter", system-ui, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.5;
+  padding-block: 32px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+h1 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin: 0;
+  text-wrap: balance;
+}
+.lede { margin: 6px 0 0; color: var(--muted); max-width: 60ch; }
+.stage {
+  background: var(--sky);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 800 / 480;
+  max-width: 100%;
+}
+canvas { display: block; width: 100%; height: 100%; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+button {
+  font: 500 0.9375rem var(--body);
+  padding: 10px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary:hover { filter: brightness(1.08); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seed {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+@media (max-width: 480px) { .seed { margin-left: 0; width: 100%; } }
+</style>
+
+</head>
+<body>
+<main>
+  <header>
+    <h1>Night Flower</h1>
+    <p class="lede">A pink bloom drawn stroke by stroke on a night sky. Each new variation reshuffles the stars and the angle of every petal.</p>
+  </header>
+
+  <div class="stage">
+    <canvas id="sky" role="img" aria-label="A pink flower with two green leaves on a stem, drawn on a black sky with white stars"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="replay" class="primary" type="button">Replay</button>
+    <button id="variation" type="button">New variation</button>
+    <span class="seed" id="seedLabel"></span>
+  </div>
+</main>
+
+<script>
+(function () {
+  var W = 800, H = 480, SCALE = 2;
+  var cv = document.getElementById("sky");
+  cv.width = W * SCALE;
+  cv.height = H * SCALE;
+  var ctx = cv.getContext("2d");
+
+  /* ---------- seeded random numbers (replaces Python's random.seed) ---------- */
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* ---------- a small turtle that records what it draws ---------- */
+  function Turtle() {
+    this.x = 0; this.y = 0; this.h = 0;
+    this.down = false; this.path = null;
+    this.stroke = "#fff"; this.fill = "#fff"; this.size = 1;
+    this.tag = ""; this.ops = [];
+  }
+  Turtle.prototype = {
+    color: function (stroke, fill) { this.stroke = stroke; this.fill = fill || stroke; },
+    pensize: function (s) { this.size = s; },
+    setheading: function (a) { this.h = a; },
+    left: function (a) { this.h += a; },
+    goto: function (x, y) {
+      this.x = x; this.y = y;
+      if (this.down) this.path.push([x, y]);
+    },
+    forward: function (d) {
+      var r = this.h * Math.PI / 180;
+      this.goto(this.x + d * Math.cos(r), this.y + d * Math.sin(r));
+    },
+    penup: function () {
+      if (this.down && this.path.length > 1) {
+        this.ops.push({ type: "line", pts: this.path, stroke: this.stroke, size: this.size, tag: this.tag });
+      }
+      this.down = false; this.path = null;
+    },
+    pendown: function () {
+      if (this.down) return;
+      this.down = true; this.path = [[this.x, this.y]];
+    },
+    begin_fill: function () { /* the fill covers the path since pendown */ },
+    end_fill: function () {
+      this.ops.push({ type: "shape", pts: this.path, stroke: this.stroke, fill: this.fill, size: this.size, tag: this.tag });
+      this.path = [[this.x, this.y]];
+    },
+    /* same arc rule as turtle.circle: positive radius turns left, negative turns right */
+    circle: function (r, extent) {
+      var steps = Math.max(8, Math.ceil(Math.abs(extent) / 2));
+      var w = extent / steps, w2 = w / 2;
+      var l = 2 * r * Math.sin(w2 * Math.PI / 180);
+      if (r < 0) { l = -l; w = -w; w2 = -w2; }
+      this.left(w2);
+      for (var i = 0; i < steps; i++) { this.forward(l); this.left(w); }
+      this.left(-w2);
+    },
+    dot: function (d, color) {
+      this.ops.push({ type: "dot", x: this.x, y: this.y, d: d, color: color, tag: this.tag });
+    }
+  };
+
+  /* ---------- the original program, step for step ---------- */
+  function buildScene(seed) {
+    var rnd = mulberry32(seed);
+    var randint = function (a, b) { return a + Math.floor(rnd() * (b - a + 1)); };
+    var uniform = function (a, b) { return a + (b - a) * rnd(); };
+    var t = new Turtle();
+
+    function stars() {
+      t.tag = "star";
+      t.penup();
+      for (var i = 0; i < 70; i++) {
+        t.goto(randint(-390, 390), randint(-230, 230));
+        t.dot(randint(2, 4), "white");
+      }
+    }
+    function stem() {
+      t.tag = "stem";
+      t.penup(); t.goto(0, 60); t.setheading(-72);
+      t.color("#2e9e5b"); t.pensize(7); t.pendown();
+      t.circle(-420, 34);
+    }
+    function leaf(x, y, angle) {
+      t.tag = "leaf";
+      t.penup(); t.goto(x, y); t.setheading(angle);
+      t.color("#7fe0a3", "#1f8a4c"); t.pensize(2); t.pendown();
+      t.begin_fill();
+      t.circle(95, 60); t.left(120); t.circle(95, 60);
+      t.end_fill();
+    }
+    function petal(size, edge, fill) {
+      t.color(edge, fill); t.pensize(2);
+      t.begin_fill();
+      t.circle(size, 80); t.left(100);
+      t.circle(size, 80); t.left(100);
+      t.end_fill();
+    }
+    function bloom() {
+      t.tag = "petal";
+      var rings = [
+        [8, 120, "#ff6fa8", "#7d0a45"],
+        [8, 102, "#ff7fb4", "#a8125c"],
+        [7, 84,  "#ff9cc6", "#d81b78"],
+        [6, 66,  "#ffb3d3", "#f2559a"],
+        [5, 50,  "#ffd0e4", "#ff8cc0"],
+        [4, 34,  "#fff0f6", "#ffc2dc"]
+      ];
+      rings.forEach(function (ring) {
+        var count = ring[0], size = ring[1], edge = ring[2], fill = ring[3];
+        var shift = randint(0, 40);
+        for (var i = 0; i < count; i++) {
+          t.penup(); t.goto(0, 60);
+          var a = shift + i * 360 / count;
+          t.setheading(a + uniform(-4, 4));
+          t.pendown();
+          petal(size + uniform(0.94, 1.04), edge, fill);
+        }
+      });
+    }
+    function center() {
+      t.tag = "core";
+      t.penup(); t.goto(0, 60);
+      t.dot(26, "#ffd54a");
+      for (var i = 0; i < 14; i++) {
+        var a = (i * 360 / 14) * Math.PI / 180;
+        t.goto(20 * Math.cos(a), 60 + Math.sin(a) * 20);
+        t.dot(5, "#ff9f1c");
+      }
+    }
+
+    stars(); stem();
+    leaf(12, -40, 15); leaf(13, -110, 165);
+    bloom(); center();
+    t.penup();
+
+    /* timeline: how long each stroke takes to draw, in seconds */
+    var dur = { star: 0.025, stem: 1.1, leaf: 0.6, petal: 0.1, core: 0.05 };
+    var clock = 0;
+    t.ops.forEach(function (op) {
+      op.start = clock;
+      op.dur = (op.tag === "core" && op.d === 26) ? 0.25 : dur[op.tag];
+      clock += op.dur;
+    });
+    return { ops: t.ops, total: clock };
+  }
+
+  /* ---------- drawing ---------- */
+  function tracePath(pts, count) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], -pts[0][1]);
+    for (var i = 1; i < count; i++) ctx.lineTo(pts[i][0], -pts[i][1]);
+  }
+
+  function render(scene, T) {
+    ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+    ctx.translate(W / 2, H / 2);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    for (var i = 0; i < scene.ops.length; i++) {
+      var op = scene.ops[i];
+      if (T < op.start) break;
+      var p = Math.min(1, (T - op.start) / op.dur);
+
+      if (op.type === "dot") {
+        ctx.fillStyle = op.color;
+        ctx.beginPath();
+        ctx.arc(op.x, -op.y, (op.d / 2) * p, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (op.type === "line") {
+        var n = Math.max(2, Math.ceil(op.pts.length * p));
+        tracePath(op.pts, n);
+        ctx.strokeStyle = op.stroke;
+        ctx.lineWidth = op.size;
+        ctx.stroke();
+      } else {
+        ctx.lineWidth = op.size;
+        ctx.strokeStyle = op.stroke;
+        if (p >= 1) {
+          tracePath(op.pts, op.pts.length);
+          ctx.closePath();
+          ctx.fillStyle = op.fill;
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          tracePath(op.pts, Math.max(2, Math.ceil(op.pts.length * p)));
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  /* ---------- controls ---------- */
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var seed = 7;
+  var scene = buildScene(seed);
+  var raf = 0;
+  var seedLabel = document.getElementById("seedLabel");
+
+  function play() {
+    cancelAnimationFrame(raf);
+    seedLabel.textContent = "Seed " + seed;
+    if (reduceMotion) { render(scene, Infinity); return; }
+    var begin = performance.now();
+    function tick(now) {
+      var T = (now - begin) / 1000;
+      if (T >= scene.total) { render(scene, Infinity); return; }
+      render(scene, T);
+      raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+  }
+
+  document.getElementById("replay").addEventListener("click", play);
+  document.getElementById("variation").addEventListener("click", function () {
+    seed = 1 + Math.floor(Math.random() * 9999);
+    scene = buildScene(seed);
+    play();
+  });
+
+  play();
+})();
+</script>
+</body>
+</html>
